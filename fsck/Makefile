@@ -1,5 +1,5 @@
 
-LIBPFS_PATH = libpfs
+LIBPFS_PATH = ../common/libpfs
 
 IOP_BIN = fsck.irx
 PFS_OBJS = $(LIBPFS_PATH)/src/bitmap.o $(LIBPFS_PATH)/src/inode.o $(LIBPFS_PATH)/src/journal.o $(LIBPFS_PATH)/src/misc.o $(LIBPFS_PATH)/src/super.o $(LIBPFS_PATH)/src/cache.o $(LIBPFS_PATH)/src/block.o

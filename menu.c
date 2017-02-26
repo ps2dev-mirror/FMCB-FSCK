@@ -14,7 +14,7 @@
 #include "system.h"
 #include "pad.h"
 #include "graphics.h"
-#include "FreeTypeSupport.h"
+#include "font.h"
 #include "UI.h"
 #include "menu.h"
 
@@ -25,8 +25,11 @@ extern GS_IMAGE PadLayoutTexture;
 enum SCAN_RESULTS_SCREEN_ID{
 	SCN_SCREEN_ID_TITLE	= 1,
 	SCN_SCREEN_ID_RESULT,
+	SCN_SCREEN_ID_LBL_ERRS_FOUND,
+	SCN_SCREEN_ID_ERRS_FOUND,
 	SCN_SCREEN_ID_LBL_ERRS_FIXED,
 	SCN_SCREEN_ID_ERRS_FIXED,
+	SCN_SCREEN_ID_LBL_SOME_ERRS_NOT_FIXED,
 	SCN_SCREEN_ID_BTN_OK,
 };
 
@@ -37,11 +40,12 @@ static struct UIMenuItem ScanResultsScreenItems[]={
 
 	{MITEM_STRING, SCN_SCREEN_ID_RESULT, MITEM_FLAG_READONLY}, {MITEM_BREAK}, {MITEM_BREAK},
 
-	{MITEM_LABEL, SCN_SCREEN_ID_LBL_ERRS_FIXED}, {MITEM_TAB}, {MITEM_VALUE, SCN_SCREEN_ID_ERRS_FIXED, MITEM_FLAG_READONLY}, {MITEM_BREAK},
+	{MITEM_LABEL, SCN_SCREEN_ID_LBL_ERRS_FOUND, 0, 0, 0, 0, 0, SYS_UI_LBL_ERRORS_FOUND}, {MITEM_TAB}, {MITEM_VALUE, SCN_SCREEN_ID_ERRS_FOUND, MITEM_FLAG_READONLY}, {MITEM_BREAK},
+	{MITEM_LABEL, SCN_SCREEN_ID_LBL_ERRS_FIXED, 0, 0, 0, 0, 0, SYS_UI_LBL_ERRORS_FIXED}, {MITEM_TAB}, {MITEM_VALUE, SCN_SCREEN_ID_ERRS_FIXED, MITEM_FLAG_READONLY}, {MITEM_BREAK},
+	{MITEM_BREAK},
 
-	{MITEM_BREAK},
-	{MITEM_BREAK},
-	{MITEM_BREAK},
+	{MITEM_LABEL, SCN_SCREEN_ID_LBL_SOME_ERRS_NOT_FIXED, 0, 0, 0, 0, 0, SYS_UI_LBL_SOME_ERRORS_NOT_FIXED}, {MITEM_BREAK},
+
 	{MITEM_BREAK},
 	{MITEM_BREAK},
 	{MITEM_BREAK},
@@ -57,7 +61,7 @@ static struct UIMenuItem ScanResultsScreenItems[]={
 	{MITEM_TERMINATOR}
 };
 
-static struct UIMenu ScanResultsScreen = {NULL, NULL, ScanResultsScreenItems};
+static struct UIMenu ScanResultsScreen = {NULL, NULL, ScanResultsScreenItems, {{BUTTON_TYPE_SYS_SELECT, SYS_UI_LBL_OK}, {-1, -1}}};
 
 static void DrawMenuEntranceSlideInMenuAnimation(int SelectedOption)
 {
@@ -101,27 +105,34 @@ void MainMenu(void)
 {
 	DrawMenuEntranceSlideInMenuAnimation(0);
 
-	if(DisplayPromptMessage(SYS_UI_MSG_AUTO_SCAN_DISK_CFM, SYS_UI_LBL_CANCEL, SYS_UI_LBL_OK)==1)
+	if(DisplayPromptMessage(SYS_UI_MSG_AUTO_SCAN_DISK_CFM, SYS_UI_LBL_OK, SYS_UI_LBL_CANCEL)==1)
 		ScanDisk(0);
 
 	DrawMenuExitAnimation();
 }
 
-void DisplayScanCompleteResults(unsigned int ErrorsFixed)
+void DisplayScanCompleteResults(unsigned int ErrorsFound, unsigned int ErrorsFixed)
 {
 	UISetString(&ScanResultsScreen, SCN_SCREEN_ID_RESULT, GetUIString(SYS_UI_MSG_SCAN_DISK_COMPLETED_OK));
 
-	if(ErrorsFixed)
+	if(ErrorsFound)
 	{
+		UISetValue(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FOUND, ErrorsFound);
 		UISetValue(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FIXED, ErrorsFixed);
+		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_LBL_ERRS_FOUND, 1);
+		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FOUND, 1);
 		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_LBL_ERRS_FIXED, 1);
 		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FIXED, 1);
 	} else {
+		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_LBL_ERRS_FOUND, 0);
+		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FOUND, 0);
 		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_LBL_ERRS_FIXED, 0);
 		UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_ERRS_FIXED, 0);
 	}
 
-	UIExecMenu(&ScanResultsScreen, NULL);
+	UISetVisible(&ScanResultsScreen, SCN_SCREEN_ID_LBL_SOME_ERRS_NOT_FIXED, (ErrorsFound != ErrorsFixed));
+
+	UIExecMenu(&ScanResultsScreen, 0, NULL, NULL);
 }
 
 void RedrawLoadingScreen(unsigned int frame)
@@ -134,19 +145,19 @@ void RedrawLoadingScreen(unsigned int frame)
 	NumDots=frame%240/60;
 
 	DrawBackground(&UIDrawGlobal, &BackgroundTexture);
-	FreeTypePrintf(&UIDrawGlobal, 10, 10, 0, 1.5f, GS_WHITE_FONT, "HDDChecker v"HDDC_VERSION);
+	FontPrintf(&UIDrawGlobal, 10, 10, 0, 1.5f, GS_WHITE_FONT, "HDDChecker v"HDDC_VERSION);
 
-	FreeTypePrintf(&UIDrawGlobal, 420, 380, 0, 1.0f, GS_WHITE_FONT, "Loading");
+	FontPrintf(&UIDrawGlobal, 420, 380, 0, 1.0f, GS_WHITE_FONT, "Loading");
 	switch(NumDots)
 	{
 		case 1:
-			FreeTypePrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, ".");
+			FontPrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, ".");
 			break;
 		case 2:
-			FreeTypePrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, "..");
+			FontPrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, "..");
 			break;
 		case 3:
-			FreeTypePrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, "...");
+			FontPrintf(&UIDrawGlobal, 560, 380, 0, 1.0f, GS_WHITE_FONT, "...");
 			break;
 	}
 

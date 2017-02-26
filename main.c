@@ -86,7 +86,7 @@ int main(int argc, char *argv[])
 
 	if(BootDevice != BOOT_DEVICE_HDD)
 	{
-		if(InitializeUI()!=0)
+		if(InitializeUI(0)!=0)
 		{
 			DeinitIntrHandlers();
 			DeinitializeUI();
@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
 			Exit(-1);
 		}
 
-		if(InitializeUI()!=0)
+		if(InitializeUI(1)!=0)
 		{
 			DeinitializeUI();
 
@@ -125,7 +125,7 @@ int main(int argc, char *argv[])
 		fileXioUmount("pfs0:");
 	}
 
-	if(fileXioDevctl("hdd0:", APA_DEVCTL_STATUS, NULL, 0, NULL, 0) == 0)
+	if(fileXioDevctl("hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0) == 0)
 	{
 		MainMenu();
 	} else {
@@ -133,6 +133,8 @@ int main(int argc, char *argv[])
 	}
 
 	DeinitializeUI();
+	if(BootDevice == BOOT_DEVICE_HDD)
+		fileXioUmount("pfs0:");
 	DeinitServices();
 
 	return 0;

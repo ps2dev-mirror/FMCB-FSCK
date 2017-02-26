@@ -14,7 +14,7 @@
 #include "system.h"
 #include "pad.h"
 #include "graphics.h"
-#include "FreeTypeSupport.h"
+#include "font.h"
 #include "UI.h"
 
 extern int errno __attribute__((section("data")));
@@ -23,11 +23,9 @@ struct UIDrawGlobal UIDrawGlobal;
 GS_IMAGE BackgroundTexture;
 GS_IMAGE PadLayoutTexture;
 
-#ifdef UI_FONT_MEM
 static void *gFontBuffer = NULL;
 static int gFontBufferSize;
-#endif
-static unsigned short int SelectButton, CancelButton;
+unsigned short int SelectButton, CancelButton;
 
 #define NUM_SUPPORTED_LANGUAGES	8
 
@@ -35,33 +33,48 @@ static int language=LANGUAGE_ENGLISH;
 
 #include "lang.c"
 
-static char *ExtLangStringTable[SYS_UI_MSG_COUNT];
-static char *ExtLangLblStringTable[SYS_UI_LBL_COUNT];
+static char *LangStringTable[SYS_UI_MSG_COUNT];
+static char *LangLblStringTable[SYS_UI_LBL_COUNT];
 
 static void UnloadLanguage(void);
 
-static int FormatLanguageStrings(const char *in, int len, char *out)
+static void WaitForDevice(void)
+{
+	nopdelay();
+	nopdelay();
+	nopdelay();
+	nopdelay();
+	nopdelay();
+	nopdelay();
+	nopdelay();
+	nopdelay();
+}
+
+static int FormatLanguageString(const char *in, int len, char *out)
 {
 	wchar_t wchar1, wchar2;
-	int ActualLength, CharLen1, CharLen2;
+	int ActualLength, CharLen1, CharLen2, ScreenLineLen;
+	char *LastWhitespaceOut;
+	const char *LastSplit;
 
+	// Line lengths are counted from the last newline character (either discovered or inserted).
 	ActualLength = 0;
+	ScreenLineLen = 0;
 	CharLen1 = mbtowc(&wchar1, in, len);
+	LastWhitespaceOut = NULL;
+	LastSplit = in;
 	while(CharLen1 > 0 && wchar1 != '\0')
 	{
 		if(((CharLen2 = mbtowc(&wchar2, in + CharLen1, len - CharLen1)) > 0) && (wchar1 == '\\' && wchar2 != '\0'))
 		{
 			switch(wchar2)
-			{
+			{	//When a translation file is used, escape characters appear like "\n" in the file.
 				case 'n':
 					*out = '\n';
 					out++;
 					ActualLength++;
-					break;
-				case 't':
-					*out = '\t';
-					out++;
-					ActualLength++;
+					ScreenLineLen = 0;
+					LastWhitespaceOut = NULL;
 					break;
 			}
 
@@ -69,11 +82,40 @@ static int FormatLanguageStrings(const char *in, int len, char *out)
 			len -= (CharLen1 + CharLen2);
 			CharLen2 = mbtowc(&wchar2, in, len);
 		} else {
+			switch(wchar1)
+			{	//Record where the latest whitespace is.
+				case ' ':
+					LastWhitespaceOut = out;
+					break;
+			}
+
 			memcpy(out, in, CharLen1);
 			out += CharLen1;
 			ActualLength += CharLen1;
 			in += CharLen1;
 			len -= CharLen1;
+
+			switch(wchar1)
+			{	//If the lines are built-in, escape characters are used.
+				case '\n':
+					ScreenLineLen = 0;
+					LastWhitespaceOut = NULL;
+					break;
+				default:
+					ScreenLineLen++;
+			}
+
+			// To wrap long lines, replace the last whitespace with a newline character
+			if(ScreenLineLen >= UI_LINE_MAX)
+			{
+				if(LastWhitespaceOut != NULL)
+				{
+					ScreenLineLen = (int)(out - LastWhitespaceOut) - 1;
+					*LastWhitespaceOut = '\n';
+					LastSplit = LastWhitespaceOut + 1;
+					LastWhitespaceOut = NULL;
+				}
+			}
 		}
 
 		CharLen1 = CharLen2;
@@ -88,7 +130,7 @@ static int ParseLanguageFile(char **array, FILE *file, unsigned int ExpectedNumL
 {
 	int result, LinesLoaded, len;
 	unsigned char BOMTemp[3];
-	char line[256];
+	char line[512];
 
 	if(fread(BOMTemp, 1, 3, file)!=3 || (BOMTemp[0]!=0xEF || BOMTemp[1]!=0xBB || BOMTemp[2]!=0xBF))
 	{	//Check for the BOM byte sequence. Skip it, if it exists.
@@ -108,7 +150,7 @@ static int ParseLanguageFile(char **array, FILE *file, unsigned int ExpectedNumL
 
 		if((array[LinesLoaded] = malloc(len + 1)) != NULL)
 		{
-			array[LinesLoaded] = realloc(array[LinesLoaded], FormatLanguageStrings(line, len + 1, array[LinesLoaded]));
+			array[LinesLoaded] = realloc(array[LinesLoaded], FormatLanguageString(line, len + 1, array[LinesLoaded]));
 		} else {
 			result=-ENOMEM;
 			break;
@@ -167,35 +209,43 @@ static int ParseFontListFile(char **array, FILE *file, unsigned int ExpectedNumL
 	return result;
 }
 
-static const char DefaultFreeTypeFontFilename[]="NotoSans-Bold.ttf";
+static const char DefaultFontFontFilename[]="NotoSans-Bold.ttf";
 
 static char *GetDefaultFontFilePath(void)
 {
 	char *result;
 
-	if((result=malloc(sizeof(DefaultFreeTypeFontFilename)+6+2))!=NULL)
-		sprintf(result, "lang/%s", DefaultFreeTypeFontFilename);
+	if((result=malloc(sizeof(DefaultFontFontFilename)+6+2))!=NULL)
+		sprintf(result, "lang/%s", DefaultFontFontFilename);
 
 	return result;
 }
 
 static char *GetFontFilePath(unsigned int language)
 {
-	char *FontFileArray[NUM_SUPPORTED_LANGUAGES], *result, *pFreeTypeFontFilename;
+	char *FontFileArray[NUM_SUPPORTED_LANGUAGES], *result, *pFontFontFilename;
 	FILE *file;
 	int i;
 
 	result=NULL;
 	memset(FontFileArray, 0, sizeof(FontFileArray));
 
-	if((file = fopen("lang/fonts.txt", "r")) != NULL)
+	while((file = fopen("lang/fonts.txt", "r")) == NULL)
+	{
+		if(errno != ENODEV)
+			break;
+
+		WaitForDevice();
+	}
+
+	if(file != NULL)
 	{
 		if(ParseFontListFile(FontFileArray, file, NUM_SUPPORTED_LANGUAGES)==0)
 		{
-			pFreeTypeFontFilename=FontFileArray[language];
+			pFontFontFilename=FontFileArray[language];
 
-			if((result = malloc(strlen(pFreeTypeFontFilename)+6)) != NULL)
-				sprintf(result, "lang/%s", pFreeTypeFontFilename);
+			if((result = malloc(strlen(pFontFontFilename)+6)) != NULL)
+				sprintf(result, "lang/%s", pFontFontFilename);
 		} else
 			result=GetDefaultFontFilePath();
 
@@ -225,13 +275,13 @@ static int LoadLanguageStrings(unsigned int language)
 		"PO"
 	};
 
-	memset(ExtLangStringTable, 0, sizeof(ExtLangStringTable));
-	memset(ExtLangLblStringTable, 0, sizeof(ExtLangLblStringTable));
+	memset(LangStringTable, 0, sizeof(LangStringTable));
+	memset(LangLblStringTable, 0, sizeof(LangLblStringTable));
 
 	sprintf(path, "lang/strings_%s.txt", LanguageShortForms[language]);
 	if((file = fopen(path, "r")) != NULL)
 	{
-		result=ParseLanguageFile(ExtLangStringTable, file, SYS_UI_MSG_COUNT);
+		result=ParseLanguageFile(LangStringTable, file, SYS_UI_MSG_COUNT);
 
 		fclose(file);
 		if(result==0)
@@ -239,7 +289,7 @@ static int LoadLanguageStrings(unsigned int language)
 			sprintf(path, "lang/labels_%s.txt", LanguageShortForms[language]);
 			if((file = fopen(path, "r")) != NULL)
 			{
-				result=ParseLanguageFile(ExtLangLblStringTable, file, SYS_UI_LBL_COUNT);
+				result=ParseLanguageFile(LangLblStringTable, file, SYS_UI_LBL_COUNT);
 				fclose(file);
 			}
 			else result = -errno;
@@ -253,48 +303,82 @@ static int LoadLanguageStrings(unsigned int language)
 	return result;
 }
 
+static int LoadDefaultLanguageStrings(void)
+{
+	int result, LinesLoaded, len;
+
+	result = 0;
+	memset(LangStringTable, 0, sizeof(LangStringTable));
+	memset(LangLblStringTable, 0, sizeof(LangLblStringTable));
+
+	//Load default strings
+	for(LinesLoaded = 0; LinesLoaded < SYS_UI_MSG_COUNT; LinesLoaded++)
+	{
+		len = strlen(DefaultLanguageStringTable[LinesLoaded]);
+
+		if((LangStringTable[LinesLoaded] = malloc(len + 1)) != NULL)
+		{
+			LangStringTable[LinesLoaded] = realloc(LangStringTable[LinesLoaded], FormatLanguageString(DefaultLanguageStringTable[LinesLoaded], len + 1, LangStringTable[LinesLoaded]));
+		} else {
+			result=-ENOMEM;
+			break;
+		}
+	}
+
+	if(result == 0)
+	{
+		//Load default labels
+		for(LinesLoaded = 0; LinesLoaded < SYS_UI_LBL_COUNT; LinesLoaded++)
+		{
+			len = strlen(DefaultLanguageLabelStringTable[LinesLoaded]);
+
+			if((LangLblStringTable[LinesLoaded] = malloc(len + 1)) != NULL)
+			{
+				LangLblStringTable[LinesLoaded] = realloc(LangLblStringTable[LinesLoaded], FormatLanguageString(DefaultLanguageLabelStringTable[LinesLoaded], len + 1, LangLblStringTable[LinesLoaded]));
+			} else {
+				result=-ENOMEM;
+				break;
+			}
+		}
+	}
+
+	if(result!=0)
+		UnloadLanguage();
+
+	return result;
+}
+
 static void UnloadLanguage(void)
 {
 	unsigned int i;
 
 	for(i=0; i<SYS_UI_MSG_COUNT; i++)
 	{
-		if(ExtLangStringTable[i]!=NULL)
+		if(LangStringTable[i]!=NULL)
 		{
-			free(ExtLangStringTable[i]);
-			ExtLangStringTable[i]=NULL;
+			free(LangStringTable[i]);
+			LangStringTable[i]=NULL;
 		}
 	}
 
 	for(i=0; i<SYS_UI_LBL_COUNT; i++)
 	{
-		if(ExtLangLblStringTable[i]!=NULL)
+		if(LangLblStringTable[i]!=NULL)
 		{
-			free(ExtLangLblStringTable[i]);
-			ExtLangLblStringTable[i]=NULL;
+			free(LangLblStringTable[i]);
+			LangLblStringTable[i]=NULL;
 		}
 	}
 }
 
 const char *GetUIString(unsigned int StringID)
 {
-	return(ExtLangStringTable[StringID]!=NULL?ExtLangStringTable[StringID]:DefaultLanguageStringTable[StringID]);
+	return(LangStringTable[StringID]);
 }
 
 const char *GetUILabel(unsigned int LabelID)
 {
-	return(ExtLangLblStringTable[LabelID]!=NULL?ExtLangLblStringTable[LabelID]:DefaultLanguageLabelStringTable[LabelID]);
-}
-static void WaitForDevice(void)
-{
-	nopdelay();
-	nopdelay();
-	nopdelay();
-	nopdelay();
-	nopdelay();
-	nopdelay();
-	nopdelay();
-	nopdelay();
+	return(LangLblStringTable[LabelID]);
 }
 
 static void InitGraphics(void)
@@ -359,8 +443,6 @@ static void InitGraphics(void)
 	GsEnableAlphaBlending2(GS_ENABLE);
 }
 
-#ifdef UI_FONT_MEM
-#define UI_LOAD_FONT_FUNC(DrawGlobal, path) LoadFontIntoBuffer(DrawGlobal, path)
 
 static int LoadFontIntoBuffer(struct UIDrawGlobal *gsGlobal, const char *path)
 {
@@ -378,7 +460,7 @@ static int LoadFontIntoBuffer(struct UIDrawGlobal *gsGlobal, const char *path)
 		{
 			if(fread(buffer, 1, size, file) == size)
 			{
-				if((result = InitFreeTypeWithBuffer(gsGlobal, buffer, size)) != 0)
+				if((result = FontInitWithBuffer(gsGlobal, buffer, size)) != 0)
 					free(buffer);
 				else {
 					gFontBuffer = buffer;
@@ -396,13 +478,80 @@ static int LoadFontIntoBuffer(struct UIDrawGlobal *gsGlobal, const char *path)
 
 	return result;
 }
-#else
-#define UI_LOAD_FONT_FUNC(DrawGlobal, path) InitFreeType(DrawGlobal, path)
-#endif
 
-int InitializeUI(void)
+static int InitFont(void)
 {
-	char *pFreeTypeFontFilePath;
+	int result;
+	char *pFontFontFilePath;
+
+	if((pFontFontFilePath=GetFontFilePath(language))!=NULL)
+	{
+		DEBUG_PRINTF("GetFontFilePath(%d): %s\n", language, pFontFontFilePath);
+	}
+	else{
+		DEBUG_PRINTF("Can't get font file path from GetFontFilePath(%d).\n", language);
+		return -1;
+	}
+
+	if((result=FontInit(&UIDrawGlobal, pFontFontFilePath))!=0)
+	{
+		DEBUG_PRINTF("InitFont(%s) result: %d. Using default font.\n", pFontFontFilePath, result);
+		free(pFontFontFilePath);
+		pFontFontFilePath=GetDefaultFontFilePath();
+
+		if((result=FontInit(&UIDrawGlobal, pFontFontFilePath))!=0)
+		{
+			DEBUG_PRINTF("InitFont(%s) result: %d\n", pFontFontFilePath, result);
+		}
+	}
+	DEBUG_PRINTF("InitFont(%s) result: %d\n", pFontFontFilePath, result);
+	free(pFontFontFilePath);
+
+	return result;
+}
+
+static int InitFontWithBuffer(void)
+{
+	int result;
+	char *pFontFontFilePath;
+
+	if(gFontBuffer == NULL)
+	{
+		if((pFontFontFilePath=GetFontFilePath(language))!=NULL)
+		{
+			DEBUG_PRINTF("GetFontFilePath(%d): %s\n", language, pFontFontFilePath);
+		}
+		else{
+			DEBUG_PRINTF("Can't get font file path from GetFontFilePath(%d).\n", language);
+			return -1;
+		}
+
+		if((result=LoadFontIntoBuffer(&UIDrawGlobal, pFontFontFilePath))!=0)
+		{
+			DEBUG_PRINTF("InitFont(%s) result: %d. Using default font.\n", pFontFontFilePath, result);
+			free(pFontFontFilePath);
+			pFontFontFilePath=GetDefaultFontFilePath();
+
+			if((result=LoadFontIntoBuffer(&UIDrawGlobal, pFontFontFilePath))!=0)
+			{
+				DEBUG_PRINTF("InitFont(%s) result: %d\n", pFontFontFilePath, result);
+			}
+		}
+		DEBUG_PRINTF("InitFont(%s) result: %d\n", pFontFontFilePath, result);
+		free(pFontFontFilePath);
+	} else
+		result = 0;
+
+	return result;
+}
+
+int ReinitializeUI(void)
+{
+	return((gFontBuffer == NULL) ? InitFont() : InitFontWithBuffer());
+}
+
+int InitializeUI(int BufferFont)
+{
 	int result;
 
 	result=0;
@@ -421,39 +570,25 @@ int InitializeUI(void)
 
 	InitGraphics();
 
-	DEBUG_PRINTF("InitGraphics()\n");
-
-	while((result=LoadLanguageStrings(language))==-ENODEV)
+	while((result = LoadLanguageStrings(language)) == -ENODEV)
 	{
 		DEBUG_PRINTF("LoadLanguageStrings(%u): %d\n", language, result);
 		WaitForDevice();
 	}
+
 	DEBUG_PRINTF("LoadLanguageStrings(%u) result: %d\n", language, result);
-
-	if((pFreeTypeFontFilePath=GetFontFilePath(language))!=NULL)
+	if(result != 0)
 	{
-		DEBUG_PRINTF("GetFontFilePath(%d): %s\n", language, pFreeTypeFontFilePath);
-	}
-	else{
-		DEBUG_PRINTF("Can't get font file path from GetFontFilePath(%d).\n", language);
-		return -1;
-	}
-
-	if((result=UI_LOAD_FONT_FUNC(&UIDrawGlobal, pFreeTypeFontFilePath))!=0)
-	{
-		DEBUG_PRINTF("InitFreeType(%s) result: %d. Using default font.\n", pFreeTypeFontFilePath, result);
-		free(pFreeTypeFontFilePath);
-		pFreeTypeFontFilePath=GetDefaultFontFilePath();
-
-		if((result=UI_LOAD_FONT_FUNC(&UIDrawGlobal, pFreeTypeFontFilePath))!=0)
+		if((result = LoadDefaultLanguageStrings()) != 0)
 		{
-			DEBUG_PRINTF("InitFreeType(%s) result: %d\n", pFreeTypeFontFilePath, result);
+			DEBUG_PRINTF("LoadDefaultLanguageStrings result: %d\n", result);
+			return result;
 		}
 	}
-	DEBUG_PRINTF("InitFreeType(%s) result: %d\n", pFreeTypeFontFilePath, result);
-	free(pFreeTypeFontFilePath);
 
-	if(result==0)
+	result = BufferFont ? InitFontWithBuffer() : InitFont();
+
+	if(result == 0)
 	{
 		LoadBackground(&UIDrawGlobal, &BackgroundTexture);
 		LoadPadGraphics(&UIDrawGlobal, &PadLayoutTexture);
@@ -467,16 +602,14 @@ int InitializeUI(void)
 void DeinitializeUI(void)
 {
 	UnloadLanguage();
-	DeinitFreeType();
+	FontDeinit();
 
-#ifdef UI_FONT_MEM
 	if(gFontBuffer != NULL)
 	{
 		free(gFontBuffer);
 		gFontBuffer = NULL;
 		gFontBufferSize = 0;
 	}
-#endif
 }
 
 enum MBOX_SCREEN_ID{
@@ -501,7 +634,6 @@ static struct UIMenuItem MessageBoxItems[]={
 	{MITEM_BREAK},
 	{MITEM_BREAK},
 	{MITEM_BREAK},
-	{MITEM_BREAK},
 
 	{MITEM_BUTTON, MBOX_SCREEN_ID_BTN1, MITEM_FLAG_POS_MID, 0, 16}, {MITEM_BREAK}, {MITEM_BREAK},
 	{MITEM_BUTTON, MBOX_SCREEN_ID_BTN3, MITEM_FLAG_POS_MID, 0, 16}, {MITEM_BREAK}, {MITEM_BREAK},
@@ -511,10 +643,12 @@ static struct UIMenuItem MessageBoxItems[]={
 	{MITEM_TERMINATOR}
 };
 
-static struct UIMenu MessageBoxMenu = {NULL, NULL, MessageBoxItems};
+static struct UIMenu MessageBoxMenu = {NULL, NULL, MessageBoxItems, {{BUTTON_TYPE_SYS_SELECT, SYS_UI_LBL_OK}, {BUTTON_TYPE_SYS_CANCEL, SYS_UI_LBL_CANCEL}}};
 
 int ShowMessageBox(int Option1Label, int Option2Label, int Option3Label, int Option4Label, const char *message, int title)
 {
+	short int numButtons;
+
 	UISetLabel(&MessageBoxMenu, MBOX_SCREEN_ID_TITLE, title);
 	UISetString(&MessageBoxMenu, MBOX_SCREEN_ID_MESSAGE, message);
 
@@ -527,9 +661,22 @@ int ShowMessageBox(int Option1Label, int Option2Label, int Option3Label, int Opt
 	UISetLabel(&MessageBoxMenu, MBOX_SCREEN_ID_BTN4, Option4Label);
 	UISetVisible(&MessageBoxMenu, MBOX_SCREEN_ID_BTN4, Option4Label != -1);
 
-	if(Option1Label != -1 || Option2Label != -1 || Option3Label != -1 || Option4Label != -1)
+	numButtons = 0;
+	if(Option1Label != -1)
+		numButtons++;
+	if(Option2Label != -1)
+		numButtons++;
+	if(Option3Label != -1)
+		numButtons++;
+	if(Option4Label != -1)
+		numButtons++;
+
+	if(numButtons > 0)
 	{
-		switch(UIExecMenu(&MessageBoxMenu, NULL))
+		MessageBoxMenu.hints[0].button = BUTTON_TYPE_SYS_SELECT;
+		MessageBoxMenu.hints[1].button = (numButtons == 1) ? -1 : BUTTON_TYPE_SYS_CANCEL;
+
+		switch(UIExecMenu(&MessageBoxMenu, 0, NULL, NULL))
 		{
 			case MBOX_SCREEN_ID_BTN1:
 				return 1;
@@ -543,7 +690,9 @@ int ShowMessageBox(int Option1Label, int Option2Label, int Option3Label, int Opt
 				return 0;
 		}
 	} else {
-		UIDrawMenu(&MessageBoxMenu, UI_OFFSET_X, UI_OFFSET_Y, -1);
+		MessageBoxMenu.hints[0].button = -1;
+		MessageBoxMenu.hints[1].button = -1;
+		UIDrawMenu(&MessageBoxMenu, 0, UI_OFFSET_X, UI_OFFSET_Y, -1);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -681,13 +830,12 @@ void UISetFormat(struct UIMenu *menu, unsigned char id, unsigned char format, un
 	}
 }
 
-void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short int selection)
+void UIDrawMenu(struct UIMenu *menu, unsigned short int frame, short int StartX, short int StartY, short int selection)
 {
 	const char *pLabel;
 	char FormatString[8], *pFormatString, ValueString[32];
 	struct UIMenuItem *item, *SelectedItem;
-	short int x, y, width, height;
-	float xRel, yRel;
+	short int x, y, width, height, xRel, yRel, button, i;
 	GS_RGBAQ colour;
 	int LabelLen;
 
@@ -713,24 +861,24 @@ void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short i
 		{
 			case MITEM_SEPERATOR:
 				x = StartX;
-				y += FONT_HEIGHT;
-				DrawLine(&UIDrawGlobal, x, y+FONT_HEIGHT/2, UIDrawGlobal.width - UI_OFFSET_X, y+FONT_HEIGHT/2, 1, GS_WHITE);
+				y += UI_FONT_HEIGHT;
+				DrawLine(&UIDrawGlobal, x, y+UI_FONT_HEIGHT/2, UIDrawGlobal.width - UI_OFFSET_X, y+UI_FONT_HEIGHT/2, 1, GS_WHITE);
 				//Fall through.
 			case MITEM_BREAK:
 				x = StartX;
-				y += FONT_HEIGHT;
+				y += UI_FONT_HEIGHT;
 				break;
 			case MITEM_TAB:
-				x += (TAB_STOPS*FONT_WIDTH) - (unsigned int)x % (unsigned int)(TAB_STOPS*FONT_WIDTH);
+				x += (UI_TAB_STOPS*UI_FONT_WIDTH) - (unsigned int)x % (unsigned int)(UI_TAB_STOPS*UI_FONT_WIDTH);
 				break;
 			case MITEM_SPACE:
-				x += FONT_WIDTH;
+				x += UI_FONT_WIDTH;
 				break;
 			case MITEM_STRING:
 				if(item->string.buffer != NULL)
 				{
 					colour = (item->flags & MITEM_FLAG_DISABLED) ? GS_GREY_FONT : ((item->flags & MITEM_FLAG_READONLY) ? GS_WHITE_FONT : (item == SelectedItem ? GS_YELLOW_FONT : GS_BLUE_FONT));
-					FreeTypePrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, item->string.buffer, &xRel, &yRel);
+					FontPrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, item->string.buffer, &xRel, &yRel);
 					x += xRel;
 					y += yRel;
 				}
@@ -740,8 +888,8 @@ void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short i
 				{
 					LabelLen = mbslen(pLabel);
 
-					width = item->width * FONT_WIDTH;
-					height = FONT_HEIGHT + FONT_HEIGHT / 2;
+					width = item->width * UI_FONT_WIDTH;
+					height = UI_FONT_HEIGHT + UI_FONT_HEIGHT / 2;
 					if(item == SelectedItem)
 					{
 						width *= 1.1f;
@@ -751,40 +899,40 @@ void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short i
 					if(item->flags & MITEM_FLAG_POS_MID)
 						x = StartX + (UIDrawGlobal.width - width) / 2;
 
-					DrawSprite(&UIDrawGlobal, x, y - FONT_HEIGHT / 2, x + width, y + height, 2, item == SelectedItem ? GS_LGREY : GS_GREY);
+					DrawSprite(&UIDrawGlobal, x, y - UI_FONT_HEIGHT / 2, x + width, y + height, 2, item == SelectedItem ? GS_LGREY : GS_GREY);
 
 					colour = (item->flags & MITEM_FLAG_DISABLED) ? GS_GREY_FONT : (item == SelectedItem ? GS_YELLOW_FONT : GS_WHITE_FONT);
 
-					FreeTypePrintfWithFeedback(&UIDrawGlobal, x + (width - LabelLen * FONT_WIDTH) / 2, y, 1, 1.0f, colour, pLabel, &xRel, &yRel);
+					FontPrintfWithFeedback(&UIDrawGlobal, x + (width - LabelLen * UI_FONT_WIDTH) / 2, y, 1, 1.0f, colour, pLabel, &xRel, &yRel);
 					x += xRel;
-					y += yRel + FONT_HEIGHT;
+					y += yRel + UI_FONT_HEIGHT;
 				}
 				break;
 			case MITEM_LABEL:
 				if((pLabel = GetUILabel(item->value.value)) != NULL)
 				{
 					if(item->flags & MITEM_FLAG_POS_MID)
-						x = (UIDrawGlobal.width - mbslen(pLabel) * FONT_WIDTH) / 2;
-					FreeTypePrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, pLabel, &xRel, &yRel);
+						x = (UIDrawGlobal.width - mbslen(pLabel) * UI_FONT_WIDTH) / 2;
+					FontPrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, pLabel, &xRel, &yRel);
 					x += xRel;
 					y += yRel;
 				}
 				break;
 			case MITEM_COLON:
-				FreeTypePrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, ":");
-				x += FONT_WIDTH;
+				FontPrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, ":");
+				x += UI_FONT_WIDTH;
 				break;
 			case MITEM_DASH:
-				FreeTypePrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, "-");
-				x += FONT_WIDTH;
+				FontPrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, "-");
+				x += UI_FONT_WIDTH;
 				break;
 			case MITEM_DOT:
-				FreeTypePrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, ".");
-				x += FONT_WIDTH;
+				FontPrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, ".");
+				x += UI_FONT_WIDTH;
 				break;
 			case MITEM_SLASH:
-				FreeTypePrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, "/");
-				x += FONT_WIDTH;
+				FontPrintf(&UIDrawGlobal, x, y, 1, 1.0f, GS_WHITE_FONT, "/");
+				x += UI_FONT_WIDTH;
 				break;
 			case MITEM_VALUE:
 				pFormatString = FormatString;
@@ -836,20 +984,64 @@ void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short i
 				*pFormatString = '\0';
 				sprintf(ValueString, FormatString, item->value.value);
 				colour = (item->flags & MITEM_FLAG_DISABLED) ? GS_GREY_FONT : ((item->flags & MITEM_FLAG_READONLY) ? GS_WHITE_FONT : (item == SelectedItem ? GS_YELLOW_FONT : GS_BLUE_FONT));
-				FreeTypePrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, ValueString, &xRel, NULL);
+				FontPrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, ValueString, &xRel, NULL);
 				x += xRel;
 				break;
 			case MITEM_PROGRESS:
 				DrawProgressBar(&UIDrawGlobal, item->value.value / 100.0f, x + 20, y, 4, UIDrawGlobal.width - (x + 20) - 20, GS_BLUE);
-				y += FONT_HEIGHT;
+				y += UI_FONT_HEIGHT;
 				break;
 #ifdef UI_EN_MITEM_TOGGLE
 			case MITEM_TOGGLE:
 				colour = (item->flags & MITEM_FLAG_DISABLED) ? GS_GREY_FONT : ((item->flags & MITEM_FLAG_READONLY) ? GS_WHITE_FONT : (item == SelectedItem ? GS_YELLOW_FONT : GS_BLUE_FONT));
-				FreeTypePrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, UIGetLabel(item->value.value == 0 ? : SYS_UI_LBL_DISABLED : SYS_UI_LBL_ENABLED), &xRel, &yRel);
+				FontPrintfWithFeedback(&UIDrawGlobal, x, y, 1, 1.0f, colour, UIGetLabel(item->value.value == 0 ? : SYS_UI_LBL_DISABLED : SYS_UI_LBL_ENABLED), &xRel, &yRel);
 				x += xRel;
 				y += yRel;
 #endif
+		}
+	}
+
+	//Draw legends
+	if(menu->next != NULL)
+	{
+		if(frame % 180 < 30)
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40 - frame % 30 / 3, 400, 4);
+		else if(frame % 180 < 60)
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40 - 10 + (frame % 30 / 3), 400, 4);
+		else
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40, 400, 4);
+	}
+	if(menu->prev != NULL)
+	{
+		if(frame % 180 < 30)
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20 + frame % 30 / 3, 400, 4);
+		else if(frame % 180 < 60)
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20 + 10 - frame % 30 / 3, 400, 4);
+		else
+			DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20, 400, 4);
+	}
+
+	x = 64;
+	for(i = 0; i < 2; i++)
+	{
+		if(menu->hints[i].button >= 0)
+		{
+			switch(menu->hints[i].button)
+			{
+				case BUTTON_TYPE_SYS_SELECT:
+					button = SelectButton == PAD_CIRCLE ? BUTTON_TYPE_CIRCLE : BUTTON_TYPE_CROSS;
+					break;
+				case BUTTON_TYPE_SYS_CANCEL:
+					button = CancelButton == PAD_CIRCLE ? BUTTON_TYPE_CIRCLE : BUTTON_TYPE_CROSS;
+					break;
+				default:
+					button = menu->hints[i].button;
+			}
+
+			DrawButtonLegendWithFeedback(&UIDrawGlobal, &PadLayoutTexture, button, x, 420, 4, &xRel);
+			x += xRel + 8;
+			FontPrintfWithFeedback(&UIDrawGlobal, x, 422, 1, 1.0f, GS_WHITE_FONT, GetUILabel(menu->hints[i].label), &xRel, NULL);
+			x += xRel + 8;
 		}
 	}
 }
@@ -860,7 +1052,7 @@ static void UITransitionSlideRightOut(struct UIMenu *menu, int SelectedOption)
 
 	for(i=0; i<=15; i++)
 	{
-		UIDrawMenu(menu, UI_OFFSET_X + i * 48, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X + i * 48, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -871,7 +1063,7 @@ static void UITransitionSlideLeftOut(struct UIMenu *menu, int SelectedOption)
 
 	for(i=0; i<=15; i++)
 	{
-		UIDrawMenu(menu, UI_OFFSET_X + -i * 48, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X + -i * 48, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -882,7 +1074,7 @@ static void UITransitionSlideRightIn(struct UIMenu *menu, int SelectedOption)
 
 	for(i=15; i>0; i--)
 	{
-		UIDrawMenu(menu, UI_OFFSET_X + i * 48, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X + i * 48, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -893,7 +1085,7 @@ static void UITransitionSlideLeftIn(struct UIMenu *menu, int SelectedOption)
 
 	for(i=15; i>0; i--)
 	{
-		UIDrawMenu(menu, UI_OFFSET_X + -i * 48, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X + -i * 48, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -911,7 +1103,7 @@ static void UITransitionFadeIn(struct UIMenu *menu, int SelectedOption)
 	for(i=0; i<=15; i++)
 	{
 		rgbaq.a = 0x80-(i*8);
-		UIDrawMenu(menu, UI_OFFSET_X, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -929,7 +1121,7 @@ static void UITransitionFadeOut(struct UIMenu *menu, int SelectedOption)
 	for(i=15; i>0; i--)
 	{
 		rgbaq.a = 0x80-(i*8);
-		UIDrawMenu(menu, UI_OFFSET_X, UI_OFFSET_Y, SelectedOption);
+		UIDrawMenu(menu, i, UI_OFFSET_X, UI_OFFSET_Y, SelectedOption);
 		SyncFlipFB(&UIDrawGlobal);
 	}
 }
@@ -957,6 +1149,29 @@ void UITransition(struct UIMenu *menu, int type, int SelectedOption)
 			UITransitionFadeOut(menu, SelectedOption);
 			break;
 	}
+}
+
+static short int UIGetSelectableItem(struct UIMenu *menu, short int id)
+{
+	short int result;
+	int i;
+
+	result = -1;
+	for(i = 0; menu->items[i].type != MITEM_TERMINATOR; i++)
+	{
+		if(menu->items[i].id == id)
+		{
+			if(menu->items[i].type > MITEM_LABEL
+				&& !(menu->items[i].flags & MITEM_FLAG_DISABLED)
+				&& !(menu->items[i].flags & MITEM_FLAG_HIDDEN)
+				&& !(menu->items[i].flags & MITEM_FLAG_READONLY))
+					result = i;
+
+			break;
+		}
+	}
+
+	return result;
 }
 
 static short int UIGetNextSelectableItem(struct UIMenu *menu, short int index)
@@ -1003,8 +1218,9 @@ static short int UIGetPrevSelectableItem(struct UIMenu *menu, short int index)
 	return result;
 }
 
-int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigned short int frame, int selection, int padstatus))
+int UIExecMenu(struct UIMenu *FirstMenu, short int SelectedItem, struct UIMenu **CurrentMenu, int (*callback)(struct UIMenu *menu, unsigned short int frame, int selection, int padstatus))
 {
+	struct UIMenu *menu;
 	int result;
 	u32 PadStatus;
 	struct UIMenuItem *item;
@@ -1013,14 +1229,19 @@ int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigne
 
 	PadStatus = 0;
 	frame = 0;
+	menu = FirstMenu;
 
-	//Find first selectable option.
-	item = ((selection = UIGetNextSelectableItem(menu, -1)) >= 0) ? &menu->items[selection] : NULL;
+	if((selection = UIGetSelectableItem(menu, SelectedItem)) >= 0)
+	{	//If the item selected is specified, select it.
+		item = &menu->items[selection];
+	} else
+		//Find first selectable option.
+		item = ((selection = UIGetNextSelectableItem(menu, -1)) >= 0) ? &menu->items[selection] : NULL;
 
 	if(callback != NULL)
 	{
 		if((result = callback(menu, frame, selection, -1)) != 0)
-			return result;
+			goto exit_menu;
 	}
 
 	while(1)
@@ -1071,12 +1292,14 @@ int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigne
 				switch(item->type)
 				{
 					case MITEM_BUTTON:
-						return item->id;
+						result = item->id;
+						goto exit_menu;
 				}
 			}
 		} else if(PadStatus&CancelButton) {
 			//User aborted.
-			return 1;
+			result = 1;
+			break;
 		}
 
 		if(PadStatus&PAD_R1) {
@@ -1093,7 +1316,7 @@ int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigne
 				if(callback != NULL)
 				{
 					if((result = callback(menu, frame, selection, -1)) != 0)
-						return result;
+						break;
 				}
 			}
 		} else if(PadStatus&PAD_L1) {
@@ -1110,40 +1333,26 @@ int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigne
 				if(callback != NULL)
 				{
 					if((result = callback(menu, frame, selection, -1)) != 0)
-						return result;
+						break;
 				}
 			}
 		}
 
-		UIDrawMenu(menu, UI_OFFSET_X, UI_OFFSET_Y, selection);
-
-		//Draw legends
-		if(menu->next != NULL)
-		{
-			if(frame % 180 < 30)
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40 - frame % 30 / 3, 400, 4);
-			else if(frame % 180 < 60)
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40 - 10 + (frame % 30 / 3), 400, 4);
-			else
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_R1, UIDrawGlobal.width - 40, 400, 4);
-		}
-		if(menu->prev != NULL)
-		{
-			if(frame % 180 < 30)
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20 + frame % 30 / 3, 400, 4);
-			else if(frame % 180 < 60)
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20 + 10 - frame % 30 / 3, 400, 4);
-			else
-				DrawButtonLegend(&UIDrawGlobal, &PadLayoutTexture, BUTTON_TYPE_L1, 20, 400, 4);
-		}
+		UIDrawMenu(menu, frame, UI_OFFSET_X, UI_OFFSET_Y, selection);
 
 		if(callback != NULL)
 		{
 			if((result = callback(menu, frame, selection, PadStatus)) != 0)
-				return result;
+				break;
 		}
 
 		SyncFlipFB(&UIDrawGlobal);
 		frame++;
 	}
+
+exit_menu:
+	if (CurrentMenu != NULL)
+		*CurrentMenu = menu;
+
+	return result;
 }

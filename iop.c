@@ -43,7 +43,7 @@ extern unsigned int IOMANX_irx_size;
 extern unsigned char FILEXIO_irx_start[];
 extern unsigned int FILEXIO_irx_size;
 
-#define SYSTEM_INIT_THREAD_STACK_SIZE	0x800
+#define SYSTEM_INIT_THREAD_STACK_SIZE	0x1000
 
 struct SystemInitParams{
 	int InitCompleteSema;

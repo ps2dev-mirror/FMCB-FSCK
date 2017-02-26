@@ -19,7 +19,8 @@
 
 extern void *_gp;
 
-int GetBootDeviceID(const char *path){
+int GetBootDeviceID(const char *path)
+{
 	int result;
 
 	if(!strncmp(path, "hdd:", 4) || !strncmp(path, "hdd0:", 5)) result=BOOT_DEVICE_HDD;
@@ -94,6 +95,7 @@ int SysCreateThread(void *function, void *stack, unsigned int StackSize, void *a
 	return ThreadID;
 }
 
+static unsigned int ErrorsFound;
 static unsigned int ErrorsFixed;
 
 static int FsckDisk(const char *partition)
@@ -102,10 +104,10 @@ static int FsckDisk(const char *partition)
 	struct fsckStatus status;
 	int fd, result, InitSemaID;
 
+	DisplayFlashStatusUpdate(SYS_UI_MSG_PLEASE_WAIT);
+
 	InitSemaID = IopInitStart(IOP_REBOOT | IOP_MOD_FSCK | IOP_MOD_HDD);
 	result = 0;
-
-	DisplayFlashStatusUpdate(SYS_UI_MSG_PLEASE_WAIT);
 
 	WaitSema(InitSemaID);
 	DeleteSema(InitSemaID);
@@ -119,10 +121,13 @@ static int FsckDisk(const char *partition)
 		}
 
 		if (result == 0 && (result = fileXioIoctl2(fd, FSCK_IOCTL2_CMD_GET_STATUS, NULL, 0, &status, sizeof(status))) == 0)
-			result = (status.errorCount != status.fixedErrorCount);
+			result = 0;
 
 		if(result == 0)
+		{
+			ErrorsFound += status.errorCount;
 			ErrorsFixed += status.fixedErrorCount;
+		}
 
 		fileXioClose(fd);
 	} else
@@ -143,19 +148,20 @@ int ScanDisk(int unit)
 	{
 		if(fileXioDevctl("hdd0:", APA_DEVCTL_GET_ERROR_PART_NAME, NULL, 0, &ErrorPartName[5], sizeof(ErrorPartName) - 5) != 0)
 		{
+			ErrorsFound = 0;
 			ErrorsFixed = 0;
 
 			if((result = FsckDisk(ErrorPartName)) == 0)
-				DisplayScanCompleteResults(ErrorsFixed);
+				DisplayScanCompleteResults(ErrorsFound, ErrorsFixed);
 			else
 				DisplayErrorMessage(SYS_UI_MSG_HDD_FAULT);
 
-			InitSemaID = IopInitStart(IOP_REBOOT | IOP_MOD_HDD | IOP_MOD_PFS);
 			DisplayFlashStatusUpdate(SYS_UI_MSG_PLEASE_WAIT);
+			InitSemaID = IopInitStart(IOP_REBOOT | IOP_MOD_HDD | IOP_MOD_PFS);
 			WaitSema(InitSemaID);
 			DeleteSema(InitSemaID);
 		} else
-			DisplayScanCompleteResults(0);	//No fault. Why are we here then?
+			DisplayScanCompleteResults(0, 0);	//No fault. Why are we here then?
 	} else
 		DisplayErrorMessage(SYS_UI_MSG_HDD_FAULT);
 

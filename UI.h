@@ -2,8 +2,11 @@
 
 #define UI_OFFSET_X	8
 #define UI_OFFSET_Y	8
+#define UI_LINE_MAX	38		//Maximum line length for messages.
+#define UI_FONT_WIDTH	FNT_CHAR_WIDTH
+#define UI_FONT_HEIGHT	FNT_CHAR_HEIGHT
+#define UI_TAB_STOPS	FNT_TAB_STOPS
 
-#define UI_FONT_MEM		1	//Uncomment to initialize FreeType and store the font in memory (useful when the IOP must be reset during runtime).
 //#define UI_EN_MITEM_TOGGLE	1	//Uncomment to make the toggle control available (Enable/disable strings must be available).
 
 enum MENU_ITEM{
@@ -65,9 +68,15 @@ struct UIMenuItem{
 	};
 };
 
+struct UIBtnHint{
+	short int button;
+	short int label;
+};
+
 struct UIMenu{
 	struct UIMenu *next, *prev;
 	struct UIMenuItem *items;
+	struct UIBtnHint hints[2];
 };
 
 enum UI_MENU_TRANSITION{
@@ -81,7 +90,8 @@ enum UI_MENU_TRANSITION{
 
 const char *GetUIString(unsigned int StringID);
 const char *GetUILabel(unsigned int LabelID);
-int InitializeUI(void);
+int InitializeUI(int BufferFont);
+int ReinitializeUI(void);
 void DeinitializeUI(void);
 int ShowMessageBox(int Option1Label, int Option2Label, int Option3Label, int Option4Label, const char *message, int title);
 void DisplayWarningMessage(unsigned int message);
@@ -98,6 +108,6 @@ void UISetLabel(struct UIMenu *menu, unsigned char id, int label);
 void UISetString(struct UIMenu *menu, unsigned char id, const char *string);
 void UISetType(struct UIMenu *menu, unsigned char id, unsigned char type);
 void UISetFormat(struct UIMenu *menu, unsigned char id, unsigned char format, unsigned char width);
-void UIDrawMenu(struct UIMenu *menu, short int StartX, short int StartY, short int selection);
+void UIDrawMenu(struct UIMenu *menu, unsigned short int frame, short int StartX, short int StartY, short int selection);
 void UITransition(struct UIMenu *menu, int type, int SelectedOption);
-int UIExecMenu(struct UIMenu *menu, int (*callback)(struct UIMenu *menu, unsigned short int frame, int selection, int padstatus));
+int UIExecMenu(struct UIMenu *FirstMenu, short int SelectedItem, struct UIMenu **CurrentMenu, int (*callback)(struct UIMenu *menu, unsigned short int frame, int selection, int padstatus));

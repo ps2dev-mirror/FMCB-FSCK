@@ -38,7 +38,7 @@ static int pfsBitmapTransfer(pfs_bitmap_t *bitmap, int mode)
 	xferParams.mode = mode;
 	xferParams.buffer = bitmap->bitmap;
 
-	if((result = ioctl2(PfsTempBitmapFD, APA_IOCTL2_TRANSFER_DATA, &xferParams, 0, NULL, 0)) < 0)
+	if((result = ioctl2(PfsTempBitmapFD, HIOCTRANSFER, &xferParams, 0, NULL, 0)) < 0)
 		printf("fsck: error: could not read/write bitmap.\n");
 	else
 		bitmap->isDirty = 0;
@@ -169,10 +169,7 @@ int pfsBitmapInit(void)
 #ifdef FSCK100
 	remove("hdd0:_tmp");
 
-	//SONY original.
-//	if((PfsTempBitmapFD = open("hdd0:_tmp,,,128M,PFS", O_CREAT|O_RDWR)) < 0)
-	//For homebrew software.
-	if((PfsTempBitmapFD = open("hdd0:_tmp,128M", O_CREAT|O_RDWR, 0)) < 0)	//FIXME: There is no mode argument, but our definition of open() strictly requires one (unlike the SCE open function).
+	if((PfsTempBitmapFD = open("hdd0:_tmp,,,128M,PFS", O_CREAT|O_RDWR, 0)) < 0)	//FIXME: There is no mode argument, but our definition of open() strictly requires one (unlike the SCE open function).
 		printf("fsck: error: could not create temporary partition.\n");
 #else
 	if((PfsTempBitmapFD = open("hdd0:__mbr", O_RDWR, 0)) < 0)	//FIXME: There is no mode argument, but our definition of open() strictly requires one (unlike the SCE open function).

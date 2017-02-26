@@ -1,16 +1,15 @@
 #include <errno.h>
 #include <irx.h>
 #include <iomanX.h>
+#include <hdd-ioctl.h>
 #include <loadcore.h>
 #include <thbase.h>
 #include <thevent.h>
 #include <stdio.h>
-#include "stdio_add.h"
 #include <sysclib.h>
 
 #include "pfs-opt.h"
 #include "libpfs.h"
-#include "hdd-ioctl.h"
 #include "bitmap.h"
 #include "misc.h"
 
@@ -35,7 +34,7 @@ static pfs_mount_t MainPFSMount = {0};	//FIXME: if not explicitly initialized to
 #define IO_BUFFER_SIZE_BYTES	(IO_BUFFER_SIZE * 512)
 
 static struct fsckRuntimeData fsckRuntimeData;
-static unsigned char IOBuffer[IO_BUFFER_SIZE_BYTES];
+static u8 IOBuffer[IO_BUFFER_SIZE_BYTES];
 
 #define FSCK_NUM_SUPPORTED_DEVICES	1
 #define FSCK_MAX_PATH_LEVELS		64
@@ -167,7 +166,7 @@ static int fsckCheckExtendedAttribute(pfs_mount_t *mount)
 	lseek(mount->fd, 0, SEEK_SET);
 	for(result = 0,remaining = 0x1FF8; remaining != 0; remaining -= size)
 	{
-		size = (remaining - IO_BUFFER_SIZE > 0) ? IO_BUFFER_SIZE : remaining;
+		size = (remaining > IO_BUFFER_SIZE) ? IO_BUFFER_SIZE : remaining;
 
 		if(read(mount->fd, IOBuffer, size * 512) == -EIO)
 		{
@@ -179,7 +178,7 @@ static int fsckCheckExtendedAttribute(pfs_mount_t *mount)
 			lseek(mount->fd, 0, SEEK_SET);
 			for(remaining = 0x1FF8; remaining != 0; remaining -= size)
 			{
-				size = (remaining - IO_BUFFER_SIZE > 0) ? IO_BUFFER_SIZE : remaining;
+				size = (remaining > IO_BUFFER_SIZE) ? IO_BUFFER_SIZE : remaining;
 
 				if((result = write(mount->fd, IOBuffer, size * 512)) < 0)
 				{
@@ -235,7 +234,7 @@ static void pfsPrintPWD(void)
 }
 
 //0x000008c8
-static int pfsInitDirEnt(pfs_mount_t *mount, short int subpart, int inodeNumber, unsigned int number, int arg5)
+static int pfsInitDirEnt(pfs_mount_t *mount, u16 subpart, u32 inodeNumber, u32 number, int arg5)
 {
 	pfs_cache_t *clink;
 	u32 *pDentry;
@@ -249,8 +248,7 @@ static int pfsInitDirEnt(pfs_mount_t *mount, short int subpart, int inodeNumber,
 			memset(clink->u.dentry, 0, pfsMetaSize);
 			pDentry = (u32*)clink->u.dentry;
 
-			/*	This is very much like pfs_dentry, but used for the first two entries of a directory.
-				But I doubt that SCEI actually used a structure here because FSCK performs sw operations to fill the structures.
+			/*	This is very much like pfs_dentry_t, but used for the first two entries of a directory.
 
 				typedef struct {
 					u32	inode;
@@ -258,7 +256,7 @@ static int pfsInitDirEnt(pfs_mount_t *mount, short int subpart, int inodeNumber,
 					u8	pLen;
 					u16	aLen;
 					char	path[4];
-				} pfs_dentry_dir;	*/
+				} pfs_dentry_t_dir;	*/
 
 			if(arg5)
 			{
@@ -283,11 +281,11 @@ static int pfsInitDirEnt(pfs_mount_t *mount, short int subpart, int inodeNumber,
 }
 
 //0x000001c0
-static int fsckCheckFileBitmap(pfs_mount_t *mount, pfs_blockinfo *blockinfo)
+static int fsckCheckFileBitmap(pfs_mount_t *mount, pfs_blockinfo_t *blockinfo)
 {
 	pfs_bitmapInfo_t bitmapinfo;
 	pfs_cache_t *clink;
-	unsigned int chunk, bit, count;
+	u32 chunk, bit, count;
 	u32 *pBitmap;
 
 	pfsBitmapSetupInfo(mount, &bitmapinfo, blockinfo->subpart, blockinfo->number);
@@ -298,7 +296,7 @@ static int fsckCheckFileBitmap(pfs_mount_t *mount, pfs_blockinfo *blockinfo)
 		if((clink = pfsBitmapReadPartition(mount, blockinfo->subpart, chunk)) != NULL)
 		{
 			for(pBitmap = &clink->u.bitmap[bitmapinfo.index]; (pBitmap < &clink->u.bitmap[0x100]) && count != 0; pBitmap++,bitmapinfo.bit = 0)
-			{
+			{	//This outer loop allows the bitmap to be actually bigger than the size on the disk. Further checks will check against bitmapinfo.bit = 0.
 				for(bit = bitmapinfo.bit; (bit < 32) && (count != 0); bit++,count--)
 				{
 					if((*pBitmap & (1 << bit)) == 0)
@@ -325,9 +323,9 @@ static int fsckCheckFileBitmap(pfs_mount_t *mount, pfs_blockinfo *blockinfo)
 }
 
 //0x00005550
-static int fsckCheckZones(unsigned int number, unsigned int size)
+static int fsckCheckZones(u32 number, u32 size)
 {
-	unsigned int index, zone, remaining, bit, startBit;
+	u32 index, zone, remaining, bit, startBit;
 	u32 *pZone;
 	pfs_bitmap_t *pBitmap;
 
@@ -342,7 +340,7 @@ static int fsckCheckZones(unsigned int number, unsigned int size)
 		if(pBitmap != NULL)
 		{
 			for(pZone = &pBitmap->bitmap[zone]; pZone < pBitmap->bitmap + 0x8000 && remaining != 0; pZone++,startBit = 0)
-			{
+			{	//This outer loop allows the bitmap to be actually bigger than the size on the disk. Further checks will check against startBit = 0.
 				for(bit = startBit; bit < 32 && remaining != 0; bit++,remaining--)
 				{
 					if((*pZone & (1 << bit)) != 0)
@@ -366,71 +364,72 @@ static int fsckCheckZones(unsigned int number, unsigned int size)
 	return 0;
 }
 
-//0x000009dc	- BUGBUG - if there's no next segment (clink2 == NULL), this function will end up dereferencing a NULL pointer.
-static void fsckFillInode(pfs_cache_t *clink, pfs_cache_t *clink2, u32 blocks, u32 entries, u32 segdesg)
+//0x000009dc	- BUGBUG - if there's no next segment (blockClink == NULL), this function will end up dereferencing a NULL pointer.
+static void fsckFillInode(pfs_cache_t *inodeClink, pfs_cache_t *blockClink, u32 blocks, u32 entries, u32 segdesg)
 {
-	memset(&clink2->u.inode->next_segment, 0, sizeof(clink2->u.inode->next_segment));
+	memset(&blockClink->u.inode->next_segment, 0, sizeof(blockClink->u.inode->next_segment));
 
-	clink->u.inode->number_segdesg = (blocks - segdesg) * clink->pfsMount->zsize;
-	clink->u.inode->subpart = 0;
-	if(!FIO_S_ISDIR(clink->u.inode->mode))
-		clink->u.inode->attr &= ~0x80;	//Clears sceMcFileAttrClosed
+	inodeClink->u.inode->number_segdesg = (blocks - segdesg) * inodeClink->pfsMount->zsize;
+	inodeClink->u.inode->subpart = 0;
+	if(!FIO_S_ISDIR(inodeClink->u.inode->mode))
+		inodeClink->u.inode->attr &= ~PFS_FIO_ATTR_CLOSED;
 
-	clink->u.inode->number_blocks = blocks;
-	clink->u.inode->number_data = entries;
-	clink->u.inode->number_segdesg = segdesg;
-	clink->u.inode->next_segment.subpart = clink2->sub;
-	clink->u.inode->last_segment.number = clink2->sector >> clink2->pfsMount->inode_scale;
-	clink2->flags |= PFS_CACHE_FLAG_DIRTY;
-	clink->flags |= PFS_CACHE_FLAG_DIRTY;
+	inodeClink->u.inode->number_blocks = blocks;
+	inodeClink->u.inode->number_data = entries;
+	inodeClink->u.inode->number_segdesg = segdesg;
+	inodeClink->u.inode->next_segment.subpart = blockClink->sub;
+	inodeClink->u.inode->last_segment.number = blockClink->sector >> blockClink->pfsMount->inode_scale;
+	blockClink->flags |= PFS_CACHE_FLAG_DIRTY;
+	inodeClink->flags |= PFS_CACHE_FLAG_DIRTY;
 }
 
 //0x00000b04	- I hate this function and it hates me.
-static int fsckCheckDirentryInode(pfs_cache_t *clink)
+static int fsckCheckDirentryInode(pfs_cache_t *direntInodeClink)
 {
 	int i, result;
-	pfs_cache_t *clink2, *clink3;
-	pfs_blockinfo *pInodeInfo;
+	pfs_cache_t *blockClink, *childDirentBlockClink;
+	pfs_blockinfo_t *pInodeInfo;
 	u32 index, new_index, inodeOffset, blocks, segdesg, inodeStart, sector;
 
 	inodeOffset = 0;
 	blocks = 0;
 	segdesg = 1;
 	result = 0;
-	clink2 = pfsCacheUsedAdd(clink);
+	blockClink = pfsCacheUsedAdd(direntInodeClink);
 
-	for(index = 0; (result == 0) && (index < clink->u.inode->number_data); index++)	//While no error occurs.
+	//Iterate through the whole directory entry and check that every part of it can be read.
+	for(index = 0; (result == 0) && (index < direntInodeClink->u.inode->number_data); index++)	//While no error occurs.
 	{
 		new_index = pfsFixIndex(index);
 
 		if(index != 0 && new_index == 0)
-		{
-			pInodeInfo = &clink2->u.inode->next_segment;
-			pfsCacheFree(clink2);
-			if((clink2 = pfsCacheGetData(clink->pfsMount, pInodeInfo->subpart, pInodeInfo->number << clink->pfsMount->inode_scale, PFS_CACHE_FLAG_SEGI, &result)) == NULL)
+		{	//Read the next inode
+			pInodeInfo = &blockClink->u.inode->next_segment;
+			pfsCacheFree(blockClink);
+			if((blockClink = pfsCacheGetData(direntInodeClink->pfsMount, pInodeInfo->subpart, pInodeInfo->number << direntInodeClink->pfsMount->inode_scale, PFS_CACHE_FLAG_SEGI, &result)) == NULL)
 			{
 				if((result == -EIO) && (fsckPromptUserAction(" Remove rest of file", 1) != 0))
-					fsckFillInode(clink, NULL, blocks, index, segdesg);	//bug?! This will cause a NULL-pointer to be dereferenced!
+					fsckFillInode(direntInodeClink, NULL, blocks, index, segdesg);	//bug?! This will cause a NULL-pointer to be dereferenced!
 				break;
 			}
 
 			segdesg++;
 		}
 
-		pInodeInfo = &clink2->u.inode->data[new_index];
-
 		//0x00000c18
-		if((clink->pfsMount->num_subs < pInodeInfo->subpart)
+		//Check that the block is valid.
+		pInodeInfo = &blockClink->u.inode->data[new_index];
+		if((direntInodeClink->pfsMount->num_subs < pInodeInfo->subpart)
 			|| (pInodeInfo->count == 0)
 			|| (pInodeInfo->number < 2)
-			|| (ZoneSizes[pInodeInfo->subpart] < ((pInodeInfo->number + pInodeInfo->count) << clink->pfsMount->sector_scale)))
+			|| (ZoneSizes[pInodeInfo->subpart] < ((pInodeInfo->number + pInodeInfo->count) << direntInodeClink->pfsMount->sector_scale)))
 		{
 			putchar('\n');
 			pfsPrintPWD();
 			printf(" contains a bad zone.");
 			if(fsckPromptUserAction(" Remove rest of file", 1) != 0)
 			{
-				fsckFillInode(clink, clink2, blocks, index, segdesg);
+				fsckFillInode(direntInodeClink, blockClink, blocks, index, segdesg);
 				break;
 			}
 
@@ -441,25 +440,26 @@ static int fsckCheckDirentryInode(pfs_cache_t *clink)
 		//0x00000ccc
 		if(new_index != 0)
 		{
-			if(FIO_S_ISDIR(clink->u.inode->mode))
-			{
+			if(FIO_S_ISDIR(direntInodeClink->u.inode->mode))
+			{	//If the inode is a directory, then all its blocks contain directory entries. Ensure that all of them can be read.
 				//0x00000cfc
 				for(i = 0; i < pInodeInfo->count; i++)
 				{
-					inodeStart = (pInodeInfo->number + i) << clink->pfsMount->inode_scale;
+					inodeStart = (pInodeInfo->number + i) << direntInodeClink->pfsMount->inode_scale;
 
 					//0x00000dbc
-					for(sector = 0; (sector < (1 << clink->pfsMount->inode_scale)) && (inodeOffset < clink->u.inode->size); sector++)
+					for(sector = 0; (sector < (1 << direntInodeClink->pfsMount->inode_scale)) && (inodeOffset < direntInodeClink->u.inode->size); sector++)
 					{
 						inodeOffset += pfsMetaSize;
-						if((clink3 = pfsCacheGetData(clink->pfsMount, pInodeInfo->subpart, inodeStart + sector, 0, &result)) != NULL)
-							pfsCacheFree(clink3);
+						if((childDirentBlockClink = pfsCacheGetData(direntInodeClink->pfsMount, pInodeInfo->subpart, inodeStart + sector, PFS_CACHE_FLAG_NOTHING, &result)) != NULL)
+							pfsCacheFree(childDirentBlockClink);
 						else{
-							if(result == -ENOMEM) break;
+							if(result == -ENOMEM)
+								goto end;
 
 							printf("fsck: could not read directory block.\n");
-							if((result = pfsInitDirEnt(clink->pfsMount, pInodeInfo->subpart, inodeStart + sector, clink->u.inode->inode_block.number, (1 == index && i == 0) ? sector < 1 : 0)) < 0)
-								break;
+							if((result = pfsInitDirEnt(direntInodeClink->pfsMount, pInodeInfo->subpart, inodeStart + sector, direntInodeClink->u.inode->inode_block.number, (index == 1 && i == 0) ? sector < 1 : 0)) < 0)
+								goto end2;
 						}
 					}
 
@@ -467,11 +467,12 @@ static int fsckCheckDirentryInode(pfs_cache_t *clink)
 					if(fsckVerbosityLevel >= 10)
 						putchar('.');
 				}
-			}else{
+			} else {
+				//The Inode contains a file. Ensure that the whole file can be read.
 				//0x00000e50
 				for(i = 0; i < pInodeInfo->count; i++)
 				{
-					if(clink->pfsMount->blockDev->transfer(clink->pfsMount->fd, IOBuffer, pInodeInfo->subpart, (pInodeInfo->number + i) << clink->pfsMount->sector_scale, 1 << clink->pfsMount->sector_scale, PFS_IO_MODE_READ) == 0)
+					if(direntInodeClink->pfsMount->blockDev->transfer(direntInodeClink->pfsMount->fd, IOBuffer, pInodeInfo->subpart, (pInodeInfo->number + i) << direntInodeClink->pfsMount->sector_scale, 1 << direntInodeClink->pfsMount->sector_scale, PFS_IO_MODE_READ) == 0)
 					{
 						if(fsckVerbosityLevel >= 10)
 							putchar('.');
@@ -481,63 +482,66 @@ static int fsckCheckDirentryInode(pfs_cache_t *clink)
 					}else{
 						printf("fsck: could not read zone.\n");
 						if(fsckPromptUserAction(" Remove rest of file", 1) != 0)
-							fsckFillInode(clink, clink2, blocks, index, segdesg);
+							fsckFillInode(direntInodeClink, blockClink, blocks, index, segdesg);
 
-						break;
+						goto end;
 					}
 				}
 			}
 		}
 
 		//0x00000ef8
-		if((result = fsckCheckFileBitmap(clink->pfsMount, pInodeInfo)) >= 0)
+		//Check the free space bitmap.
+		if((result = fsckCheckFileBitmap(direntInodeClink->pfsMount, pInodeInfo)) >= 0)
 		{
-			if((result = fsckCheckZones(pInodeInfo->number + ZoneMap[pInodeInfo->subpart], pInodeInfo->count)) > 0)
-			{
-				if(fsckPromptUserAction(" Remove rest of file", 1) != 0)
-					fsckFillInode(clink, clink2, blocks, index, segdesg);
-				break;
-			}else if(result >= 0){	//result == 0
-				//0x00000f7c
+			if((result = fsckCheckZones(pInodeInfo->number + ZoneMap[pInodeInfo->subpart], pInodeInfo->count)) == 0)
+			{	//0x00000f7c
 				fsckRuntimeData.status.inodeBlockCount += pInodeInfo->count;
 				blocks += pInodeInfo->count;
 				if(fsckRuntimeData.stopFlag != 0)
 					break;
-			}else{
+			} else if (result > 0) {
+				//0x00000f44
+				if(fsckPromptUserAction(" Remove rest of file", 1) != 0)
+					fsckFillInode(direntInodeClink, blockClink, blocks, index, segdesg);
 				break;
-			}
-		}else{
-			break;
-		}
+			} else	// result < 0
+				goto end2;
+		}else
+			goto end2;
 	}
 
 end:
 	if(result < 0)
+	{
+end2:
 		fsckRuntimeData.hasError = 1;
+	}
 
 	//0x00000ff0
 	if(fsckVerbosityLevel >= 2)
 		printf("\n");
 
-	pfsCacheFree(clink2);
+	pfsCacheFree(blockClink);
 
 	return result;
 }
 
 //0x00000828
-static void fsckFixDEntry(pfs_cache_t *clink, pfs_dentry *dentry)
+static void fsckFixDEntry(pfs_cache_t *clink, pfs_dentry_t *dentry)
 {
-	unsigned int dEntrySize, offset;
-	unsigned short int aLen;
-	pfs_dentry *pDEntryNew, *pDEntry;
+	u32 dEntrySize, offset;
+	u16 aLen;
+	pfs_dentry_t *pDEntryNew, *pDEntry;
 
-	dEntrySize = (unsigned int)((u8*)clink->u.dentry - (u8*)dentry);
-	if((int)dEntrySize < 0)
+	dEntrySize = (u32)((u8*)dentry - (u8*)clink->u.dentry);
+	//if((s32)dEntrySize < 0)
+	if(clink->u.dentry > dentry)
 		dEntrySize += 0x1FF;
 
-	dEntrySize = dEntrySize >> 9 << 9;
-	pDEntryNew = (pfs_dentry*)((u8*)clink->u.dentry + dEntrySize);
-	for(pDEntry = NULL,offset = 0; offset < sizeof(pfs_dentry); offset += aLen,pDEntry = pDEntryNew,pDEntryNew = (pfs_dentry*)((u8*)pDEntryNew + aLen))
+	dEntrySize = dEntrySize >> 9 << 9;	//Round off
+	pDEntryNew = (pfs_dentry_t*)((u8*)clink->u.dentry + dEntrySize);
+	for(pDEntry = NULL,offset = 0; offset < sizeof(pfs_dentry_t); offset += aLen,pDEntry = pDEntryNew,pDEntryNew = (pfs_dentry_t*)((u8*)pDEntryNew + aLen))
 	{
 		aLen = pDEntryNew->aLen & 0x0FFF;
 
@@ -558,7 +562,7 @@ static void fsckFixDEntry(pfs_cache_t *clink, pfs_dentry *dentry)
 }
 
 //0x000012b4
-static void fsckCheckSelfEntry(pfs_cache_t *SelfInodeClink, pfs_cache_t *SelfDEntryClink, pfs_dentry *dentry)
+static void fsckCheckSelfEntry(pfs_cache_t *SelfInodeClink, pfs_cache_t *SelfDEntryClink, pfs_dentry_t *dentry)
 {
 	if((SelfInodeClink->sub != dentry->sub) || (SelfInodeClink->u.inode->inode_block.number != dentry->inode))
 	{
@@ -566,14 +570,14 @@ static void fsckCheckSelfEntry(pfs_cache_t *SelfInodeClink, pfs_cache_t *SelfDEn
 		if(fsckPromptUserAction(" Fix", 1) != 0)
 		{
 			dentry->sub = SelfInodeClink->u.inode->inode_block.subpart;
-			dentry->inode =  SelfInodeClink->u.inode->inode_block.number;
+			dentry->inode = SelfInodeClink->u.inode->inode_block.number;
 			SelfDEntryClink->flags |= PFS_CACHE_FLAG_DIRTY;
 		}
 	}
 }
 
 //0x00001374
-static void fsckCheckParentEntry(pfs_cache_t *ParentInodeClink, pfs_cache_t *SelfDEntryClink, pfs_dentry *dentry)
+static void fsckCheckParentEntry(pfs_cache_t *ParentInodeClink, pfs_cache_t *SelfDEntryClink, pfs_dentry_t *dentry)
 {
 	if((ParentInodeClink->sub != dentry->sub) || (ParentInodeClink->u.inode->inode_block.number != dentry->inode))
 	{
@@ -581,7 +585,7 @@ static void fsckCheckParentEntry(pfs_cache_t *ParentInodeClink, pfs_cache_t *Sel
 		if(fsckPromptUserAction(" Fix", 1) != 0)
 		{
 			dentry->sub = ParentInodeClink->u.inode->inode_block.subpart;
-			dentry->inode =  ParentInodeClink->u.inode->inode_block.number;
+			dentry->inode = ParentInodeClink->u.inode->inode_block.number;
 			SelfDEntryClink->flags |= PFS_CACHE_FLAG_DIRTY;
 		}
 	}
@@ -590,7 +594,7 @@ static void fsckCheckParentEntry(pfs_cache_t *ParentInodeClink, pfs_cache_t *Sel
 static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClink);
 
 //0x00001054
-static void fsckCheckFile(pfs_cache_t *FileInodeClink, pfs_cache_t *FileInodeDataClink, pfs_dentry *dentry)
+static void fsckCheckFile(pfs_cache_t *FileInodeClink, pfs_cache_t *FileInodeDataClink, pfs_dentry_t *dentry)
 {
 	if(fsckRuntimeData.status.PWDLevel < FSCK_MAX_PATH_LEVELS - 1)
 	{
@@ -616,7 +620,8 @@ static void fsckCheckFile(pfs_cache_t *FileInodeClink, pfs_cache_t *FileInodeDat
 					((pfs_aentry_t*)IOBuffer)->aLen = 1024;
 					if(FileInodeDataClink->pfsMount->blockDev->transfer(FileInodeDataClink->pfsMount->fd, IOBuffer, FileInodeDataClink->sub, (FileInodeDataClink->sector + 1) << pfsBlockSize, 1 << pfsBlockSize, PFS_IO_MODE_WRITE) != 0)
 						fsckRuntimeData.hasError = 1;
-				}
+				} else	//This is not actually needed, but it's done in the original.
+					fsckRuntimeData.hasError = 1;
 			}
 		}
 
@@ -640,9 +645,9 @@ static void fsckCheckFile(pfs_cache_t *FileInodeClink, pfs_cache_t *FileInodeDat
 static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClink)
 {
 	pfs_blockpos_t BlockPosition;
-	pfs_dentry *pDEntry, *pDEntryEnd;
+	pfs_dentry_t *pDEntry, *pDEntryEnd;
 	int result;
-	unsigned int inodeOffset, dEntrySize;	//inodeOffset doesn't seem to be 64-bit, even though the inode size field is 64-bits wide.
+	u32 inodeOffset, dEntrySize;	//inodeOffset doesn't seem to be 64-bit, even though the inode size field is 64-bits wide.
 	pfs_cache_t *DEntryClink, *FileInodeDataClink;
 
 	inodeOffset = 0;
@@ -662,8 +667,9 @@ static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClin
 	while(inodeOffset < InodeClink->u.inode->size)
 	{
 		//0x000014cc
-		if(pDEntry >= (pfs_dentry*)(DEntryClink->u.data + 1024))
+		if(pDEntry >= (pfs_dentry_t*)(DEntryClink->u.data + 1024))
 		{
+			//Read next inode
 			//0x000014e4
 			pfsCacheFree(DEntryClink);
 			if(pfsInodeSync(&BlockPosition, 1024, InodeClink->u.inode->number_data) != 0 || (DEntryClink = pfsGetDentriesChunk(&BlockPosition, &result)) == NULL)
@@ -674,7 +680,7 @@ static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClin
 		}
 
 		//0x0000153c
-		for(pDEntry = DEntryClink->u.dentry, pDEntryEnd = DEntryClink->u.dentry + 1; pDEntry < pDEntryEnd; pDEntry = (pfs_dentry*)((u8*)pDEntry + dEntrySize),inodeOffset += dEntrySize)
+		for(pDEntry = DEntryClink->u.dentry, pDEntryEnd = DEntryClink->u.dentry + 1; pDEntry < pDEntryEnd; pDEntry = (pfs_dentry_t*)((u8*)pDEntry + dEntrySize),inodeOffset += dEntrySize)
 		{
 			if(fsckRuntimeData.stopFlag != 0)
 				goto end;
@@ -683,7 +689,7 @@ static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClin
 
 			if(dEntrySize & 3)
 			{
-				dEntrySize = (unsigned int)((u8*)pDEntryEnd - (u8*)pDEntry);
+				dEntrySize = (u32)((u8*)pDEntryEnd - (u8*)pDEntry);
 				printf("fsck: directory entry is not aligned.\n");
 
 				if(fsckPromptUserAction(" Fix", 1) != 0)
@@ -695,7 +701,7 @@ static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClin
 
 			if(dEntrySize < ((pDEntry->pLen + 11) & ~3))
 			{
-				dEntrySize = (unsigned int)((u8*)pDEntryEnd - (u8*)pDEntry);
+				dEntrySize = (u32)((u8*)pDEntryEnd - (u8*)pDEntry);
 				printf("fsck: directory entry is too small.\n");
 
 				if(fsckPromptUserAction(" Fix", 1) != 0)
@@ -714,9 +720,9 @@ static void fsckCheckFiles(pfs_cache_t *ParentInodeClink, pfs_cache_t *InodeClin
 			}
 
 			//0x00001654
-			if(pDEntryEnd < (pfs_dentry*)((u8*)pDEntry + dEntrySize))
+			if(pDEntryEnd < (pfs_dentry_t*)((u8*)pDEntry + dEntrySize))
 			{
-				dEntrySize = (unsigned int)((u8*)pDEntryEnd - (u8*)pDEntry);
+				dEntrySize = (u32)((u8*)pDEntryEnd - (u8*)pDEntry);
 				printf("fsck: directory entry is too long.\n");
 				if(fsckPromptUserAction(" Fix", 1) != 0)
 					fsckFixDEntry(DEntryClink, pDEntry);
@@ -760,10 +766,10 @@ end:
 }
 
 //0x0000054c
-static unsigned int fsckCompareBitmap(pfs_mount_t *mount, void *buffer)
+static u32 fsckCompareBitmap(pfs_mount_t *mount, void *buffer)
 {
 	int hasUpdate;
-	unsigned int i, NumZones, zone;
+	u32 i, NumZones, zone;
 	u32 *pBitmap, sector, *pRawBitmap, RawSize, unaligned, length, offset;
 
 	for(i = 0,offset = 0; i < mount->num_subs + 1; i++,offset++)
@@ -876,27 +882,27 @@ static void FsckThread(void *arg)
 		if(fsckRuntimeData.hasError == 0)
 		{
 			if(fsckRuntimeData.stopFlag == 0)
-			{
+			{	//Clear the write error state, if it was set.
 				if(((pfs_mount_t*)arg)->blockDev->transfer(((pfs_mount_t*)arg)->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_READ) == 0)
 				{
-					if(((pfs_super_block*)IOBuffer)->pfsFsckStat & 1)
+					if(((pfs_super_block_t*)IOBuffer)->pfsFsckStat & PFS_FSCK_STAT_WRITE_ERROR)
 					{
-						((pfs_super_block*)IOBuffer)->pfsFsckStat &= ~1;
+						((pfs_super_block_t*)IOBuffer)->pfsFsckStat &= ~PFS_FSCK_STAT_WRITE_ERROR;
 						((pfs_mount_t*)arg)->blockDev->transfer(((pfs_mount_t*)arg)->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_WRITE);
 					}
 				}
 
-				ioctl2(((pfs_mount_t*)arg)->fd, APA_IOCTL2_GET_PART_ERROR, NULL, 0, NULL, 0);
+				ioctl2(((pfs_mount_t*)arg)->fd, HIOCGETPARTERROR, NULL, 0, NULL, 0);
 			}
 		}
 	}
 
 	//0x00002164
 	if(fsckRuntimeData.status.fixedErrorCount != 0)
-	{
+	{	//Indicate that errors were fixed.
 		if(((pfs_mount_t*)arg)->blockDev->transfer(((pfs_mount_t*)arg)->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_READ) == 0)
 		{
-			((pfs_super_block*)IOBuffer)->pfsFsckStat |= 2;
+			((pfs_super_block_t*)IOBuffer)->pfsFsckStat |= PFS_FSCK_STAT_ERRORS_FIXED;
 			((pfs_mount_t*)arg)->blockDev->transfer(((pfs_mount_t*)arg)->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_WRITE);
 		}
 	}
@@ -916,7 +922,7 @@ static int FsckUnsupported(void)
 //0x00000340
 static int fsckCheckBitmap(pfs_mount_t *mount, void *buffer)
 {
-	unsigned int i, count, block, BitmapStart, sector;
+	u32 i, count, block, BitmapStart, sector;
 	int result;
 
 	result = 0;
@@ -963,8 +969,9 @@ static int CheckSuperBlock(pfs_mount_t *pMainPFSMount)
 	u32 *pFreeZones;
 
 	pMainPFSMount->num_subs = pMainPFSMount->blockDev->getSubNumber(pMainPFSMount->fd);
-	if(pMainPFSMount->blockDev->transfer(pMainPFSMount->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_READ) < 0 || (((pfs_super_block*)IOBuffer)->magic != PFS_SUPER_MAGIC))
+	if(pMainPFSMount->blockDev->transfer(pMainPFSMount->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_READ) < 0 || (((pfs_super_block_t*)IOBuffer)->magic != PFS_SUPER_MAGIC))
 	{
+		//0x00001930
 		printf("fsck: Read super block failed, try another.\n");
 
 		if(pMainPFSMount->blockDev->transfer(pMainPFSMount->fd, IOBuffer, 0, PFS_SUPER_BACKUP_SECTOR, 1, PFS_IO_MODE_READ) != 0)
@@ -973,7 +980,7 @@ static int CheckSuperBlock(pfs_mount_t *pMainPFSMount)
 			return -EIO;
 		}
 
-		result = (((pfs_super_block*)IOBuffer)->magic == PFS_SUPER_MAGIC) ? 0 : -EIO;
+		result = (((pfs_super_block_t*)IOBuffer)->magic == PFS_SUPER_MAGIC) ? 0 : -EIO;
 
 		if(result != 0)
 		{
@@ -993,29 +1000,29 @@ static int CheckSuperBlock(pfs_mount_t *pMainPFSMount)
 		}
 	}
 
-	//0x00001930
-	if(((pfs_super_block*)IOBuffer)->version >= PFS_VERSION)
+	//0x00001a1c
+	if(((pfs_super_block_t*)IOBuffer)->version >= PFS_VERSION)
 	{
 		printf("fsck: error: unknown version.\n");
 		return -EINVAL;
 	}
 
-	if(((((pfs_super_block*)IOBuffer)->zone_size & (((pfs_super_block*)IOBuffer)->zone_size - 1)) != 0) ||
-		(((pfs_super_block*)IOBuffer)->zone_size < 0x800) ||
-		(0x20000 < ((pfs_super_block*)IOBuffer)->zone_size))
+	if(((((pfs_super_block_t*)IOBuffer)->zone_size & (((pfs_super_block_t*)IOBuffer)->zone_size - 1)) != 0) ||
+		(((pfs_super_block_t*)IOBuffer)->zone_size < 0x800) ||
+		(0x20000 < ((pfs_super_block_t*)IOBuffer)->zone_size))
 	{
 		printf("fsck: error: invalid zone size.\n");
 		return -EINVAL;
 	}
 
-	if(pMainPFSMount->num_subs < ((pfs_super_block*)IOBuffer)->num_subs)
+	if(pMainPFSMount->num_subs < ((pfs_super_block_t*)IOBuffer)->num_subs)
 	{
 		printf("fsck: filesystem larger than partition size.\n");
 
 		if(fsckPromptUserAction(" Fix size", 1) == 0)
 			return -EINVAL;
 
-		((pfs_super_block*)IOBuffer)->num_subs = pMainPFSMount->num_subs;
+		((pfs_super_block_t*)IOBuffer)->num_subs = pMainPFSMount->num_subs;
 		if((result = pMainPFSMount->blockDev->transfer(pMainPFSMount->fd, IOBuffer, 0, PFS_SUPER_SECTOR, 1, PFS_IO_MODE_WRITE)) < 0)
 		{
 			printf("fsck: error: could not fix the filesystem size.\n");
@@ -1023,13 +1030,13 @@ static int CheckSuperBlock(pfs_mount_t *pMainPFSMount)
 		}
 	}
 
-	pMainPFSMount->zsize = ((pfs_super_block*)IOBuffer)->zone_size;
-	pMainPFSMount->sector_scale = pfsGetScale(((pfs_super_block*)IOBuffer)->zone_size, 512);
-	pMainPFSMount->inode_scale = pfsGetScale(((pfs_super_block*)IOBuffer)->zone_size, 1024);
+	pMainPFSMount->zsize = ((pfs_super_block_t*)IOBuffer)->zone_size;
+	pMainPFSMount->sector_scale = pfsGetScale(((pfs_super_block_t*)IOBuffer)->zone_size, 512);
+	pMainPFSMount->inode_scale = pfsGetScale(((pfs_super_block_t*)IOBuffer)->zone_size, 1024);
 
-	memcpy(&pMainPFSMount->root_dir, &((pfs_super_block*)IOBuffer)->root, sizeof(pMainPFSMount->root_dir));
-	memcpy(&pMainPFSMount->log, &((pfs_super_block*)IOBuffer)->log, sizeof(pMainPFSMount->log));
-	memcpy(&pMainPFSMount->current_dir, &((pfs_super_block*)IOBuffer)->root, sizeof(pMainPFSMount->current_dir));
+	memcpy(&pMainPFSMount->root_dir, &((pfs_super_block_t*)IOBuffer)->root, sizeof(pMainPFSMount->root_dir));
+	memcpy(&pMainPFSMount->log, &((pfs_super_block_t*)IOBuffer)->log, sizeof(pMainPFSMount->log));
+	memcpy(&pMainPFSMount->current_dir, &((pfs_super_block_t*)IOBuffer)->root, sizeof(pMainPFSMount->current_dir));
 	pMainPFSMount->total_sector = 0;
 
 	if(fsckVerbosityLevel)
@@ -1074,7 +1081,7 @@ static int CheckSuperBlock(pfs_mount_t *pMainPFSMount)
 static int FsckOpen(iop_file_t *fd, const char *name, int flags, int mode)
 {
 	int blockfd, result, i;
-	unsigned int count;
+	u32 count;
 	iox_stat_t StatData;
 	pfs_block_device_t *pblockDevData;
 
@@ -1090,7 +1097,7 @@ static int FsckOpen(iop_file_t *fd, const char *name, int flags, int mode)
 		return result;
 	}
 
-	if(StatData.mode != 0x100)	//PFS
+	if(StatData.mode != APA_TYPE_PFS)
 	{
 		printf("fsck: error: not PFS.\n");
 		return -EINVAL;
